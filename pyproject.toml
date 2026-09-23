@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────
+# recognition-facial — Servicio gRPC de reconocimiento facial
+# Detección: YOLO (ultralytics) · Embeddings: InsightFace/ONNX
+# Búsqueda: FAISS (fallback NumPy) · Empaquetado: PyInstaller
+# ─────────────────────────────────────────────────────────────
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recognition-facial"
+version = "0.1.0"
+description = "Servicio gRPC de reconocimiento facial: detección YOLO + embeddings InsightFace + índice FAISS"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Sandra · Code-Epic", email = "dev@sandra.ecosystem" }]
+keywords = ["face", "recognition", "yolo", "insightface", "faiss", "grpc"]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "ultralytics>=8.2.0",
+    "insightface>=0.7.3",
+    "onnxruntime>=1.18.0",
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.26,<3.0",
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=4.25,<6.0",
+    "faiss-cpu>=1.8.0",
+    "python-dotenv>=1.0",
+    "Pillow>=10.0",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+face-service = "face_service.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["face_service*"]
+exclude = ["tests*", "scripts*"]
+
+[tool.setuptools.package-data]
+face_service = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]

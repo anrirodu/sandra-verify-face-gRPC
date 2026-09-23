@@ -1,0 +1,266 @@
+// ═══════════════════════════════════════════════════════════
+// recognition-facial · Contrato gRPC (protobuf v3)
+//
+// Servicio de reconocimiento facial desacoplado para el
+// ecosistema Sandra. Flujo interno:
+//
+//   imagen(bytes) → YOLO (detección de rostros)
+//                 → InsightFace rec.onnx (embedding 512-d)
+//                 → FAISS/NumPy (búsqueda de similitud)
+//                 → FaceResult[] (respuesta estructurada)
+//
+// Convenciones del ecosistema Sandra:
+//   - Identificadores en inglés (lenguaje del protocolo)
+//   - Comentarios en español
+//   - Loose-fit: los métodos aceptan bytes crudos de imagen
+//     (jpg/png/bmp/webp) sin pre-procesamiento del cliente.
+//
+// Compilar:   scripts/compile_proto.sh
+// Genera:     face_service/pb2/*_pb2.py y *_pb2_grpc.py
+// ═══════════════════════════════════════════════════════════
+syntax = "proto3";
+
+package sandra.face;
+
+option go_package = "github.com/code-epic/sandra-go/gen/face;facepb";
+option java_multiple_files = true;
+option java_package = "ec.com.sandra.face";
+option java_outer_classname = "FaceRecognitionProto";
+option py_generic_services = false;
+
+// ═══════════════════════════════════════════════════════════
+// Servicio principal
+// ═══════════════════════════════════════════════════════════
+service FaceRecognition {
+  // Analiza una imagen: detecta, embebe y busca rostros conocidos.
+  // Auto-registra nuevos rostros si register_faces = true.
+  rpc ProcessImage (ImageRequest) returns (ImageReply);
+
+  // Registra a una persona en el índice (imagen con un rostro
+  // principal, o embedding directo).
+  rpc RegisterFace (RegisterRequest) returns (RegisterReply);
+
+  // Elimina a una persona del índice junto con todos sus vectores.
+  rpc RemovePerson (RemoveRequest) returns (RemoveReply);
+
+  // Devuelve el listado de personas indexadas.
+  rpc ListPersons (ListRequest) returns (ListReply);
+
+  // Health check (liveness + estado de modelos). Sin dependencias I/O.
+  rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Comparación 1:1: valida si la imagen capturada pertenece a la
+  // persona referenciada por su cédula (usa la foto guardada en
+  // ``imagenes/<person_id>.<ext>`` como referencia).
+  rpc VerifyFace (VerifyRequest) returns (VerifyReply);
+}
+
+// ─── Procesamiento de imagen ──────────────────────────────
+message ImageRequest {
+  // Bytes crudos de la imagen (jpg, png, bmp, webp).
+  bytes image_data = 1;
+
+  // Pista de formato (opcional; se autodetecta si es vacío).
+  string format = 2;
+
+  // Umbral de confianza de detección YOLO (0.0–1.0). Vacío = config.
+  optional float min_confidence = 3;
+
+  // Umbral de similitud para considerar match (0–1). Vacío = config.
+  optional float match_threshold = 4;
+
+  // Si true, registra en el índice los rostros detectados que aún
+  // no pertenecen a nadie (auto-enrolamiento).
+  bool register_faces = 5;
+}
+
+message ImageReply {
+  // Rostros detectados (ordenados por confianza descendente).
+  repeated FaceResult faces = 1;
+
+  // Tiempo total del pipeline (detección + embedding + búsqueda) en ms.
+  double processing_ms = 2;
+
+  // Dimensiones de la imagen de entrada (px).
+  int32 image_width = 3;
+  int32 image_height = 4;
+
+  // Número de rostros nuevos auto-registrados en esta llamada.
+  int32 faces_registered = 5;
+
+  // Indicador de que el índice se ha modificado (para ttl/cache del cliente).
+  bool index_changed = 6;
+}
+
+message FaceResult {
+  // Identificador de la persona conocida ("" si es desconocida).
+  string person_id = 1;
+
+  // Etiqueta legible (ej: "Coronel Luis Peña").
+  string label = 2;
+
+  // Confianza de la detección YOLO (0.0–1.0).
+  float confidence = 3;
+
+  // Puntuación de similitud del mejor match (0–1; 1 = idéntico).
+  float match_score = 4;
+
+  // Caja delimitadora del rostro en la imagen original (px).
+  BBox bbox = 5;
+
+  // true si coincide con una persona indexada.
+  bool known = 6;
+
+  // Embedding 512-d del rostro (solo se rellena si el cliente lo
+  // solicita vía include_embeddings; si no queda vacío para ahorrar bytes).
+  repeated float embedding = 7;
+}
+
+message BBox {
+  float x = 1;       // esquina superior-izquierda X
+  float y = 2;       // esquina superior-izquierda Y
+  float width = 3;   // anchura
+  float height = 4;  // altura
+}
+
+// ─── Enrolamiento ──────────────────────────────────────────
+message RegisterRequest {
+  // Identificador único de la persona (id del sistema de origen).
+  string person_id = 1;
+
+  // Etiqueta legible (opcional; se usará person_id si es vacío).
+  string label = 2;
+
+  // Imagen con UN rostro principal (jpg/png/bmp/webp).
+  bytes image_data = 3;
+
+  // Pista de formato (opcional).
+  string format = 4;
+
+  // Alternativa a image_data: pasar directamente el embedding
+  // (debe medir INDEX_DIM). Si se envía, se omite la detección.
+  repeated float embedding = 5;
+
+  // Umbral de detección YOLO para localizar el rostro (vacío = config).
+  optional float min_confidence = 6;
+}
+
+message RegisterReply {
+  bool success = 1;
+
+  // Mensaje legible ("Rostro registrado", "Persona actualizada", …).
+  string message = 2;
+
+  // Primary key interna asignada por el índice.
+  int64 entry_id = 3;
+
+  // Total de vectores indexados tras esta operación.
+  int32 index_size = 4;
+
+  // Embedding calculado (512-d), por si el cliente desea persistirlo.
+  repeated float embedding = 5;
+
+  // 0 = creado, 1 = actualizado (misma person_id ya indexada).
+  int32 status = 6;
+}
+
+// ─── Verificación 1:1 (referencia guardada vs. cámara) ─────
+message VerifyRequest {
+  // Cédula de la persona (ej: "17818665"). La foto de referencia se
+  // busca como ``imagenes/<person_id>.jpg`` (o formato detectado).
+  string person_id = 1;
+
+  // Imagen capturada por la cámara (jpg/png/webp/bmp).
+  bytes image_data = 2;
+
+  // Pista de formato de la imagen capturada (opcional).
+  string format = 3;
+
+  // Umbral de detección YOLO para la imagen capturada (vacío = config).
+  optional float min_confidence = 4;
+
+  // Umbral de similitud para considerar match (vacío = config 0.50).
+  optional float match_threshold = 5;
+}
+
+message VerifyReply {
+  // Operación completada (true aunque no haya match; false = error).
+  bool success = 1;
+
+  // true si la persona de la cámara coincide con la referencia.
+  bool match = 2;
+
+  // Similitud coseno 0–1 entre el rostro de la cámara y la referencia.
+  float score = 3;
+
+  // Umbral usado en la comparación.
+  float threshold = 4;
+
+  // Cédula/identificador validado.
+  string person_id = 5;
+
+  // Etiqueta de la persona registrada (si existe).
+  string label = 6;
+
+  // Nombre de la imagen de referencia usada (ej: "17818665.jpg").
+  string reference_image = 7;
+
+  // Mensaje legible ("MATCH", "NO_MATCH", "Referencia no existe", …).
+  string message = 8;
+
+  // Tiempo total del pipeline de verificación (ms).
+  double processing_ms = 9;
+}
+
+// ─── Eliminación ──────────────────────────────────────────
+message RemoveRequest {
+  string person_id = 1;
+}
+
+message RemoveReply {
+  bool success = 1;
+  int32 removed = 2;     // nº de vectores eliminados
+  int32 index_size = 3;  // tamaño restante del índice
+}
+
+// ─── Listado ──────────────────────────────────────────────
+message ListRequest {}
+
+message ListReply {
+  repeated PersonInfo persons = 1;
+}
+
+message PersonInfo {
+  string person_id = 1;
+  string label = 2;
+
+  // Nº de embeddings (fotos de rostro) registrados para esta persona.
+  int32 face_count = 3;
+  bool registered = 4;
+}
+
+// ─── Health / liveness ────────────────────────────────────
+message HealthCheckRequest {
+  // Opcional: si es true, devuelve también Nº de rostros del índice.
+  bool verbose = 1;
+}
+
+message HealthCheckResponse {
+  // "SERVING" | "NOT_SERVING" | "LOADING"
+  string status = 1;
+
+  // Versión del servicio.
+  string version = 2;
+
+  // Sello de tiempo del arranque (epoch seconds).
+  int64 started_at = 3;
+
+  // Tiempo activo en segundos.
+  int64 uptime_seconds = 4;
+
+  // Modelos cargados correctamente.
+  bool model_loaded = 5;
+
+  // Indica si la inferencia usa aceleración (GPU/MPS/CoreML).
+  bool accelerated = 6;
+}

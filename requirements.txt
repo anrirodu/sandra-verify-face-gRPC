@@ -1,0 +1,29 @@
+# ⬢ recognition-facial — Servicio gRPC de reconocimiento facial
+# Uso: pip install -r requirements.txt
+#
+# Plataformas objetivo (PyInstaller → binario autónomo):
+#   macOS ARM64 (Apple Silicon): onnxruntime usa CoreML/ANE
+#   Linux x86_64 con GPU NVIDIA:  descomentar onnxruntime-gpu
+#   Linux x86_64 CPU:             onnxruntime (CPU puro)
+
+ultralytics>=8.2.0
+insightface>=0.7.3
+onnxruntime>=1.20.0
+opencv-python-headless>=4.10.0
+numpy>=1.26,<3.0
+grpcio>=1.60
+grpcio-tools>=1.60
+protobuf>=4.25,<6.0
+faiss-cpu>=1.8.0
+python-dotenv>=1.0
+Pillow>=10.0
+tqdm>=4.65.0
+
+# ─── GPU/plataforma (opcional) ────────────────────────────
+# GPU NVIDIA (Linux):          # onnxruntime-gpu>=1.20.0
+# CPU Intel con OpenVINO:      # onnxruntime-openvino>=1.20.0
+
+# ─── Desarrollo / tests ──────────────────────────────────
+pytest>=8.0
+pytest-asyncio>=0.24
+ruff>=0.6

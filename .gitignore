@@ -1,0 +1,33 @@
+# ─── Entorno ─────────────────────────────────────────
+.env
+*.env.local
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Pesos y modelos ─────────────────────────────────
+models/*.pt
+models/*.onnx
+models/buffalo_l/
+models/*.pkl
+!models/.gitkeep
+
+# ─── Índice y datos locales ─────────────────────────
+data/*.index
+data/*.ndjson
+data/*.json
+data/files/
+!data/.gitkeep
+
+# ─── Builds / binarios ──────────────────────────────
+dist/
+build/
+*.spec.bak
+
+# ─── Protobuf generado ──────────────────────────────
+face_service/pb2/
