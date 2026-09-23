@@ -1,0 +1,172 @@
+# ⬡ Build & Release · recognition-facial
+# Genera el binario Linux autónomo (PyInstaller) para RHEL / CentOS 8 y 9.
+#
+#   · CentOS 8 está EOL → se usa rockylinux:8, rebuild binario-compatible
+#     de RHEL 8 (glibc 2.28). El binario EL8 también corre en EL9.
+#   · CentOS 9 → rockylinux:9 (glibc 2.34), compat RHEL 9 / CentOS Stream 9.
+#   · El checkout corre en el runner Ubuntu (git presente); el build completo
+#     (dnf + pip + pyinstaller) se ejecuta con `docker run` dentro del
+#     contenedor EL. Así no dependemos de git dentro de la imagen minimal.
+#   · Torch se instala como wheel CPU puro (menos banda: ~300MB vs 2.5GB).
+#   · models/*.pt está en .gitignore → se descarga al vuelo del CI.
+#   · server.py usa imports relativos → se compila vía entrypoint raíz
+#     `sandra_face_server.py` para que PyInstaller resuelva el paquete.
+#
+# Requisito en el host objetivo (CentOS/RHEL): libgomp, libGL y libSM/Xext
+#   dnf install -y libgomp libglvnd-glx libXext libSM
+# El reconocedor InsightFace (buffalo_l) no va embebido: se descarga solo en
+# el primer arranque a ~/.insightface/models/buffalo_l/ (requiere red).
+
+name: build-release-face
+
+on:
+  push:
+    tags:
+      - 'face-v*'
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  PY: python3.11
+
+jobs:
+  ##########################################################################
+  # BUILD MATRIX — RHEL/CentOS 8 y 9
+  ##########################################################################
+  build:
+    name: 🔨 ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: rockylinux:8
+            label: Linux RHEL/CentOS 8 (x86_64)
+            os: el8
+            ext: ''
+
+          - image: rockylinux:9
+            label: Linux RHEL/CentOS 9 (x86_64)
+            os: el9
+            ext: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dentro de contenedor ${{ matrix.os }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            ${{ matrix.image }} \
+            bash -x -c '
+              set -e
+              # ── Sistema (OpenCV/ONNX en EL8/EL9) ──────────────
+              dnf -y install \
+                ${{ env.PY }} ${{ env.PY }}-pip ${{ env.PY }}-devel \
+                gcc gcc-c++ make patch \
+                libgomp libglvnd-glx libXext libSM
+              ${{ env.PY }} -m pip install --upgrade pip
+
+              # ── Peso YOLO (gitignored en el repo) ──────────────
+              mkdir -p models
+              if [ ! -s models/yolov8n-face.pt ]; then
+                curl -fL --retry 3 --continue-at - \
+                  -o models/yolov8n-face.pt \
+                  "https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8n.pt"
+              fi
+              ls -lh models/yolov8n-face.pt
+
+              # ── Python deps (torch CPU + resto) ────────────────
+              ${{ env.PY }} -m pip install \
+                torch torchvision --index-url https://download.pytorch.org/whl/cpu
+              ${{ env.PY }} -m pip install -r requirements.txt
+              ${{ env.PY }} -m pip install pyinstaller
+
+              # ── Build PyInstaller ───────────────────────────────
+              rm -rf build dist
+              ${{ env.PY }} -m PyInstaller \
+                --onefile \
+                --name sandra-face \
+                --paths . \
+                --collect-all ultralytics \
+                --collect-all insightface \
+                --collect-all onnxruntime \
+                --collect-all grpc \
+                --collect-all google.protobuf \
+                --collect-all faiss \
+                --hidden-import pkg_resources \
+                --add-data "models/yolov8n-face.pt:models/" \
+                sandra_face_server.py
+
+              # ── Verificación ────────────────────────────────────
+              ls -lh dist/sandra-face
+              file dist/sandra-face || true
+              sha256sum dist/sandra-face | tee dist/sandra-face.sha256
+
+              # ── Smoke test (--help con timeout) ─────────────────
+              timeout 120 ./dist/sandra-face --help 2>&1 | tail -5 || true
+            '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandra-face-linux-${{ matrix.os }}-x86_64${{ matrix.ext }}
+          path: |
+            dist/sandra-face${{ matrix.ext }}
+            dist/sandra-face${{ matrix.ext }}.sha256
+          compression-level: 0
+          if-no-files-found: error
+
+  ##########################################################################
+  # RELEASE (solo en tag)
+  ##########################################################################
+  release:
+    name: 📦 Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sandra-face-linux-*
+          merge-multiple: true
+          path: release
+
+      - name: List artifacts
+        run: |
+          ls -lh release/
+          echo "── SHA256 ──"
+          cat release/*.sha256 2>/dev/null || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: recognition-facial ${{ github.ref_name }}
+          body: |
+            ## ⬡ recognition-facial ${{ github.ref_name }}
+
+            Binarios Linux para RHEL/CentOS 8 y 9 (PyInstaller, autónomos).
+
+            ### Instalación
+
+            ```bash
+            chmod +x sandra-face-linux-el8-x86_64
+            ./sandra-face-linux-el8-x86_64 --host 0.0.0.0 --port 50052
+            ```
+
+            ### Notas
+            - El binario EL8 (glibc 2.28) también corre en RHEL/CentOS 9.
+            - Requiere en el host: `libgomp libglvnd-glx libXext libSM`.
+            - El reconocedor InsightFace (buffalo_l) se descarga solo en
+              el primer arranque a `~/.insightface/models/buffalo_l/`.
+            - El peso de detección (YOLOv8n-face) va incrustado.
+          files: |
+            release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false
